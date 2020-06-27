@@ -7,7 +7,7 @@ import numpy as np
 from scipy.special import logsumexp
 from sklearn.base import BaseEstimator
 from sklearn.utils import check_array, check_random_state
-
+import scipy.optimize
 from . import _hmmc, _utils
 from .utils import normalize, log_normalize, iter_from_X_lengths, log_mask_zero
 
@@ -189,7 +189,16 @@ class _BaseHMM(BaseEstimator):
                  algorithm="viterbi", random_state=None,
                  n_iter=10, tol=1e-2, verbose=False,
                  params=string.ascii_letters,
-                 init_params=string.ascii_letters):
+                 init_params=string.ascii_letters,
+                 A1 = None,
+                 a = 0,
+                 b = 1,
+                 grad_iter = 100,
+                 grad_conv = 10**-2,
+                 grad_lr = 10**-2,
+                 t0 = 0,
+                 transmat_ = None,
+                 startprob_ = None):
         self.n_components = n_components
         self.params = params
         self.init_params = init_params
@@ -201,6 +210,18 @@ class _BaseHMM(BaseEstimator):
         self.tol = tol
         self.verbose = verbose
         self.monitor_ = ConvergenceMonitor(self.tol, self.n_iter, self.verbose)
+        # added samuelbray32
+        self.A1 = A1 #time dependent transition matrix
+        self.a = a #parameters of sigmoid function
+        self.b = b
+        self.grad_iter = grad_iter #stop criteria for _grad_descent
+        self.grad_conv = grad_conv
+        self.grad_lr = grad_lr
+        self.t0 = t0
+        self.transmat_ = transmat_
+        self.startprob_ = startprob_
+        self.track_params = []
+        self.grad_method = 'newtons_linesearch'
 
     def get_stationary_distribution(self):
         """Compute the stationary distribution of states.
@@ -464,6 +485,7 @@ class _BaseHMM(BaseEstimator):
 
         self.monitor_._reset()
         for iter in range(self.n_iter):
+            print('E iteration: ', iter)
             stats = self._initialize_sufficient_statistics()
             curr_logprob = 0
             for i, j in iter_from_X_lengths(X, lengths):
@@ -475,10 +497,14 @@ class _BaseHMM(BaseEstimator):
                 self._accumulate_sufficient_statistics(
                     stats, X[i:j], framelogprob, posteriors, fwdlattice,
                     bwdlattice)
-
+                print('fwd: ', fwdlattice[10])
+                print('bwd: ', bwdlattice[10])
             # XXX must be before convergence check, because otherwise
             #     there won't be any updates for the case ``n_iter=1``.
-            self._do_mstep(stats)
+            del fwdlattice
+            del bwdlattice
+            del framelogprob
+            self._do_mstep(stats, posteriors)
 
             self.monitor_.report(curr_logprob)
             if self.monitor_.converged:
@@ -500,20 +526,45 @@ class _BaseHMM(BaseEstimator):
     def _do_forward_pass(self, framelogprob):
         n_samples, n_components = framelogprob.shape
         fwdlattice = np.zeros((n_samples, n_components))
+        # _hmmc._forward(n_samples, n_components,
+        #                log_mask_zero(self.startprob_),
+        #                self.transmat_,
+        #                framelogprob, fwdlattice,
+        #                self.A1,
+        #                self.U(np.arange(n_samples)+self.t0))
+        t = np.arange(n_samples)+self.t0
+        log_trans = self.transmat_ + np.transpose(self.A1[:,:,None]*self.U(t),[2,0,1])
+        log_trans[log_trans<0] = 10**-20
+        print('trans: ', np.min(log_trans))
+        log_trans = log_mask_zero(log_trans)
+        print('log_trans: ', np.max(log_trans))
         _hmmc._forward(n_samples, n_components,
                        log_mask_zero(self.startprob_),
-                       log_mask_zero(self.transmat_),
-                       framelogprob, fwdlattice)
+                       log_trans,
+                       framelogprob, fwdlattice,)
+
         with np.errstate(under="ignore"):
             return logsumexp(fwdlattice[-1]), fwdlattice
 
     def _do_backward_pass(self, framelogprob):
         n_samples, n_components = framelogprob.shape
         bwdlattice = np.zeros((n_samples, n_components))
+        # _hmmc._backward(n_samples, n_components,
+        #                 log_mask_zero(self.startprob_),
+        #                 self.transmat_,
+        #                 framelogprob, bwdlattice,
+        #                 self.A1,
+        #                 self.U(np.arange(n_samples)+self.t0))
+        t = np.arange(n_samples)+self.t0
+        log_trans = self.transmat_ + np.transpose(self.A1[:,:,None]*self.U(t),[2,0,1])
+        log_trans[log_trans<0] = 10**-20
+        print('trans: ', np.min(log_trans))
+        log_trans = log_mask_zero(log_trans)
+        print('log_trans: ', np.max(log_trans))
         _hmmc._backward(n_samples, n_components,
-                        log_mask_zero(self.startprob_),
-                        log_mask_zero(self.transmat_),
-                        framelogprob, bwdlattice)
+                       log_mask_zero(self.startprob_),
+                       log_trans,
+                       framelogprob, bwdlattice,)
         return bwdlattice
 
     def _compute_posteriors(self, fwdlattice, bwdlattice):
@@ -680,7 +731,7 @@ class _BaseHMM(BaseEstimator):
             with np.errstate(under="ignore"):
                 stats['trans'] += np.exp(log_xi_sum)
 
-    def _do_mstep(self, stats):
+    def _do_mstep(self, stats, posteriors):
         """Performs the M-step of EM algorithm.
 
         Parameters
@@ -703,3 +754,285 @@ class _BaseHMM(BaseEstimator):
             transmat_ = np.maximum(self.transmat_prior - 1 + stats['trans'], 0)
             self.transmat_ = np.where(self.transmat_ == 0, 0, transmat_)
             normalize(self.transmat_, axis=1)
+        if not self.a == None:
+            # self._grad_ascent(self._transition_posterior(posteriors))
+            log_P_tij = log_mask_zero(np.zeros((posteriors.shape[0],self.n_components,self.n_components)))
+            _hmmc._transition_posterior(log_P_tij.shape[0], self.n_components, log_P_tij, log_mask_zero(posteriors))
+            if self.grad_method == 'newtons_linesearch':
+                self._newtons_linesearch(np.exp(log_P_tij[1:]))
+            elif self.grad_method == 'newtons':
+                self._newtons(np.exp(log_P_tij[1:]))
+            elif self.grad_method == 'grad_ascent':
+                self._grad_ascent(np.exp(log_P_tij[1:]))
+            elif self.grad_method == 'grad_ascent_linesearch':
+                self._grad_ascent_linesearch(np.exp(log_P_tij[1:]))
+            elif self.grad_method == 'scipy':
+                self._scipy(np.exp(log_P_tij[1:]))
+            else:
+                print (self.grad_method, ' is not a defined method')
+
+    def _transition_posterior_external(self, log_P_tij, posteriors):
+        _hmmc._transition_posterior(log_P_tij.shape[0], self.n_components, log_P_tij, log_mask_zero(posteriors))
+
+    def U(self, t):
+        return 1-self.sigma(t)
+
+    def dU(self, t):
+        return -self.sigma(t)*(1-self.sigma(t))
+
+    # NEW VERSION: x = t/a - b
+    def sigma(self, t):
+        # print('new sigma')
+        t = t/24/60/120
+        return (1+np.exp(-(t-self.b)/self.a))**-1
+
+    def _grad_ascent(self, P_tij):
+        print('transition posteriors:', P_tij.shape)
+        print('max: ', np.max(P_tij))
+        print('sumcheck: ', np.sum(P_tij[1,:,:]), np.sum(P_tij[-1,:,:]) )
+        if np.array(self.grad_lr).size == 1:
+            self.grad_lr = [self.grad_lr, self.grad_lr]
+        t = np.arange(P_tij.shape[0]) + self.t0
+        for iter in range(self.grad_iter):
+            mu = self._mu(t) * P_tij
+            db = -mu.sum()/self.a *self.grad_lr[1]
+            da = -(((t/24/60/120-self.b)[:,None,None]/self.a**2)*mu).sum()*self.grad_lr[0]
+
+            print('mu: ', self._mu(t)[10].sum())
+            print('gradients: ', da, db)
+            if (np.abs(da) <= self.grad_conv * np.abs(self.a)) and (np.abs(db) <= self.grad_conv * np.abs(self.b)):
+                print('converged: ', iter)
+                print('a: ', self.a)
+                print('b: ', self.b)
+                return;
+            self.a = self.a + da
+            self.b = self.b + db
+            print('a: ', self.a)
+            print('b: ', self.b)
+        print(self.grad_iter)
+
+    def _grad_ascent_linesearch(self, P_tij):
+        t = np.arange(P_tij.shape[0])
+        L = lambda : (P_tij*np.log(self.transmat_ + np.transpose(self.A1[:,:,None]*self.U(t),[2,0,1]))).sum()
+        # grad_ascent update w/ linesearch
+        L_prev = L()
+        for iter in range(self.grad_iter):
+            # define direction
+            mu = self._mu(t) * P_tij
+            db = -mu.sum()/self.a
+            da = -(((t/24/60/120-self.b)[:,None,None]/self.a**2)*mu).sum()
+            delta = np.array([da,db])
+            delta =delta/np.linalg.norm(delta, ord=2)
+            print('grad: ', da, db)
+            # determine step size
+            prev_a = self.a
+            prev_b = self.b
+            updated = False
+            for s in self.grad_lr:
+                self.a = self.a + s*delta[0]
+                self.b = self.b + s*delta[1]
+                L_new = L()
+                # check if sufficient improvement, if so quit
+                #note: log likelihood (L) will always be <0
+                #therefore WANT L_new/L_prev < 1
+                if L_new/L_prev < self.grad_conv:
+                    L_prev = L_new
+                    updated = True
+                    break;
+                else:
+                    self.a = prev_a
+                    self.b = prev_b
+
+            # check convergence
+            # if (np.abs(delta[0]/self.a) < self.grad_conv) and (np.abs(delta[1]/self.b) < self.grad_conv): #TODO: put in convergence criteria
+            #     break
+            if not updated:
+                self.a = prev_a
+                self.b = prev_b
+                print('not updated')
+                break
+            self.track_params.append([self.a,self.b, delta[0], delta[1], L_new])
+            print('a: ',self.a)
+            print('b: ', self.b)
+
+
+    def _newtons(self,P_tij):
+        for i in range(self.grad_iter):
+            print(i)
+            J, g = self._jacobian_grad(P_tij)
+            delta =  - np.matmul(np.linalg.inv(J), g)
+            print('Jac: ', J)
+            print('grad: ', g)
+            print('Diff: ', delta)
+            if (np.abs(delta[0]/self.a) < self.grad_conv) and (np.abs(delta[1]/self.b) < self.grad_conv): #TODO: put in convergence criteria
+                break
+            self.a = self.a + self.grad_lr[0] * delta[0]
+            self.b = self.b + self.grad_lr[1] * delta[1]
+            self.track_params.append([self.a,self.b, delta[0], delta[1]])
+            print('a: ',self.a)
+            print('b: ', self.b)
+        return
+
+    def _newtons_linesearch(self,P_tij):
+        t = np.arange(P_tij.shape[0])
+        L = lambda : (P_tij*np.log(self.transmat_ + np.transpose(self.A1[:,:,None]*self.U(t),[2,0,1]))).sum()
+        #newton update w/ linesearch
+        L_prev = L()
+        for i in range(self.grad_iter):
+            # get step direction
+            print(i)
+            J, g = self._jacobian_grad(P_tij)
+            delta =  - np.matmul(np.linalg.inv(J), g)
+            if np.linalg.norm(delta, ord=2)>1: #sets a maximum to the step size
+                delta =delta/np.linalg.norm(delta, ord=2)
+            print('Jac: ', J)
+            print('grad: ', g)
+            print('Diff: ', delta)
+            # determine step size
+            prev_a = self.a
+            prev_b = self.b
+            updated = False
+            for s in self.grad_lr:
+                self.a = self.a + s*delta[0]
+                self.b = self.b + s*delta[1]
+                L_new = L()
+                # check if sufficient improvement, if so quit
+                #note: log likelihood (L) will always be <0
+                #therefore WANT L_new/L_prev < 1
+                print('L',L_new,L_prev)
+                if L_new/L_prev < self.grad_conv:
+                    L_prev = L_new
+                    updated = True
+                    break;
+                else:
+                    self.a = prev_a
+                    self.b = prev_b
+
+            # check convergence
+            # if (np.abs(delta[0]/self.a) < self.grad_conv) and (np.abs(delta[1]/self.b) < self.grad_conv): #TODO: put in convergence criteria
+            #     break
+            if not updated:
+                self.a = prev_a
+                self.b = prev_b
+                print('not updated')
+                break
+            self.track_params.append([self.a,self.b, delta[0], delta[1], L_new])
+            print('a: ',self.a)
+            print('b: ', self.b)
+
+        return
+
+    def _scipy(self, P_tij):
+        t = np.arange(P_tij.shape[0])
+        def nL(x):
+            a = x[0]
+            b = x[1]
+            u_loc = lambda t: 1-(1+np.exp(-(t/120/60/24-b)/a))**-1
+            t = np.arange(P_tij.shape[0])
+            return -(P_tij*np.log(self.transmat_ + np.transpose(self.A1[:,:,None]*u_loc(t),[2,0,1]))).sum()
+        def jac(x):
+            a = x[0]
+            b = x[1]
+            sigma_loc = lambda t: 1-(1+np.exp(-(t/120/60/24-b)/a))**-1
+            u_loc = lambda t: 1-sigma_loc(t)
+            du_loc = lambda t: -sigma_loc(t)*(1-sigma_loc(t))
+            mu_loc =lambda t: np.transpose(self.A1[:,:,None]*u_loc(t),[2,0,1])/self.transmat_ + np.transpose(self.A1[:,:,None]*u_loc(t),[2,0,1])
+            t = np.arange(P_tij.shape[0])
+            mu = mu_loc(t) * P_tij
+            dxda = -((t/24/60/120-b)[:,None,None]/a**2)
+            dxdb = -1/a
+            db = mu*dxdb
+            da = mu*dxda
+            return -np.array([np.sum(da), np.sum(db)])
+        def hess(x):
+            a = x[0]
+            b = x[1]
+            sigma_loc = lambda t: 1-(1+np.exp(-(t/120/60/24-b)/a))**-1
+            u_loc = lambda t: 1-sigma_loc(t)
+            du_loc = lambda t: -sigma_loc(t)*(1-sigma_loc(t))
+            mu_loc =lambda t: np.transpose(self.A1[:,:,None]*u_loc(t),[2,0,1])/self.transmat_ + np.transpose(self.A1[:,:,None]*u_loc(t),[2,0,1])
+            t = np.arange(P_tij.shape[0])
+            mu = mu_loc(t) * P_tij
+            dxda = -((t/24/60/120-b)[:,None,None]/a**2)
+            dxdb = -1/a
+            db = -mu*dxdb
+            da = -mu*dxda
+            dL2_dada = (da*(-mu_loc(t)*dxda+(2*u_loc(t)-1)[:,None,None]*dxda-2/a)).sum()
+            dL2_dbdb = (db*(-mu_loc(t)*dxdb+(2*u_loc(t)-1)[:,None,None]*dxdb)).sum()
+            dL2_dadb = (db*(-mu_loc(t)*dxda+(2*u_loc(t)-1)[:,None,None]*dxda+dxdb)).sum()
+            dL2_dbda = dL2_dadb#(db*(-self._mu(t)*dxda+(2*self.U(t)-1)[:,None,None]*dxda+dxdb)
+            return np.array([[dL2_dada, dL2_dadb],[dL2_dbda, dL2_dbdb]])
+
+        #result = scipy.optimize.minimize(nL,[self.a,self.b],method='Newton-CG', jac=jac, hess=hess, tol=self.grad_conv,)
+        result = scipy.optimize.minimize(nL,[self.a,self.b])
+        self.a = result.x[0]
+        self.b = result.x[1]
+        self.track_params.append([self.a,self.b,result.fun])
+        self._grad_ascent_linesearch(P_tij)
+
+
+
+    def _jacobian_grad(self,P_tij):
+        t = np.arange(P_tij.shape[0])
+        mu = self._mu(t) * P_tij
+        dxda = -((t/24/60/120-self.b)[:,None,None]/self.a**2)
+        dxdb = -1/self.a
+        db = mu*dxdb
+        da = mu*dxda
+
+        G = np.array([np.sum(da), np.sum(db)])
+
+        dL2_dada = (da*(-self._mu(t)*dxda+(2*self.U(t)-1)[:,None,None]*dxda-2/self.a)).sum()
+        dL2_dbdb = (db*(-self._mu(t)*dxdb+(2*self.U(t)-1)[:,None,None]*dxdb)).sum()
+        dL2_dadb = (db*(-self._mu(t)*dxda+(2*self.U(t)-1)[:,None,None]*dxda+dxdb)).sum()
+        dL2_dbda = dL2_dadb#(db*(-self._mu(t)*dxda+(2*self.U(t)-1)[:,None,None]*dxda+dxdb)
+        J = np.array([[dL2_dada, dL2_dadb],[dL2_dbda, dL2_dbdb]])
+        return J, G
+
+    # # OLD VERSION: x = a*(t-b)
+    # def sigma(self, t):
+    #     return (1+np.exp(-self.a*(t-self.b)))**-1
+    #
+    # def _grad_ascent(self, P_tij):
+    #     print('transition posteriors:', P_tij.shape)
+    #     print('max: ', np.max(P_tij))
+    #     print('sumcheck: ', np.sum(P_tij[1,:,:]), np.sum(P_tij[-1,:,:]) )
+    #     t = np.arange(P_tij.shape[0]) + self.t0
+    #     for iter in range(self.grad_iter):
+    #         mu = self._mu(t) * P_tij
+    #         db = -mu.sum()#*self.a*-1
+    #         da = ((t[:,None,None]-self.b)*mu).sum()
+    #
+    #         print('mu: ', self._mu(t)[10].sum())
+    #         print('gradients: ', da, db)
+    #         if (self.grad_lr * np.abs(da) <= self.grad_conv * np.abs(self.a)) and (self.grad_lr * np.abs(db) <= self.grad_conv * np.abs(self.b)):
+    #             print('converged: ', iter)
+    #             return;
+    #         #self.a = self.a + self.grad_lr * da
+    #         self.b = self.b + self.grad_lr * db
+    #     print(self.grad_iter)
+
+
+    def _transition_posterior(self, posteriors):
+        print('posterior shape: ',posteriors.shape)
+        print('max: ', np.max(posteriors))
+        print('sumcheck: ', np.sum(posteriors[1,:]), np.sum(posteriors[-1,:]) )
+        P_tij = np.zeros((posteriors.shape[0],self.n_components,self.n_components))
+        for t in range(1, P_tij.shape[0]):
+            for i in range(self.n_components):
+                for j in range(self.n_components):
+                    P_tij[t,i,j] = posteriors[t-1,i]*posteriors[t,j]
+        return P_tij
+
+    def _mu(self,t):
+        num = np.transpose(self.A1[:,:,None]*self.dU(t),[2,0,1])
+        denom = self.transmat_ + np.transpose(self.A1[:,:,None]*self.U(t),[2,0,1])
+        # print('mu num: ', num[10,:,:].sum())
+        # print('mu denom: ', denom[10].sum())
+        return num/denom
+
+    def _set_transmat(self, transmat_):
+        self.transmat_ = (transmat_)
+
+    def _set_startprob(self,startprob):
+        self.startprob_ = startprob

@@ -154,13 +154,33 @@ class GaussianHMM(_BaseHMM):
                  covars_prior=1e-2, covars_weight=1,
                  algorithm="viterbi", random_state=None,
                  n_iter=10, tol=1e-2, verbose=False,
-                 params="stmc", init_params="stmc"):
+                 params="stmc", init_params="stmc",
+                  A1 = None, # for superclass
+                  a = 1,
+                  b = 1,
+                  grad_iter = 100,
+                  grad_conv = 10**-2,
+                  grad_lr = 10**-2,
+                  t0 = 0,
+                  transmat_ = None,
+                  startprob_ = None,
+                  means_ = None, #for subclass
+                  covars_ = None):
         _BaseHMM.__init__(self, n_components,
                           startprob_prior=startprob_prior,
                           transmat_prior=transmat_prior, algorithm=algorithm,
                           random_state=random_state, n_iter=n_iter,
                           tol=tol, params=params, verbose=verbose,
-                          init_params=init_params)
+                          init_params=init_params,
+                           A1 = A1,
+                           a = a,
+                           b = b,
+                           grad_iter = grad_iter,
+                           grad_conv =grad_conv,
+                           grad_lr = grad_lr,
+                           t0 = t0,
+                           transmat_ = transmat_,
+                           startprob_ = startprob_)
 
         self.covariance_type = covariance_type
         self.min_covar = min_covar
@@ -168,6 +188,8 @@ class GaussianHMM(_BaseHMM):
         self.means_weight = means_weight
         self.covars_prior = covars_prior
         self.covars_weight = covars_weight
+        self.means_ = means_
+        self.covars_ = covars_
 
     @property
     def covars_(self):
@@ -262,8 +284,8 @@ class GaussianHMM(_BaseHMM):
                 stats['obs*obs.T'] += np.einsum(
                     'ij,ik,il->jkl', posteriors, obs, obs)
 
-    def _do_mstep(self, stats):
-        super()._do_mstep(stats)
+    def _do_mstep(self, stats, posteriors):
+        super()._do_mstep(stats, posteriors)
 
         means_prior = self.means_prior
         means_weight = self.means_weight

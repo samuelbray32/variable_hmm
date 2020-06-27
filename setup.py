@@ -45,7 +45,7 @@ class build_ext(build_ext):
 
 
 setup(
-    name="hmmlearn",
+    name="sb_hmmlearn",
     description="Hidden Markov Models in Python with scikit-learn like API",
     long_description=open("README.rst", encoding="utf-8").read(),
     maintainer="Antony Lee",
@@ -81,7 +81,7 @@ setup(
     use_scm_version=lambda: {  # xref __init__.py
         "version_scheme": "post-release",
         "local_scheme": "node-and-date",
-        "write_to": "lib/hmmlearn/_version.py",
+        "write_to": "lib/sb_hmmlearn/_version.py",
         "fallback_version": "0+unknown",
     },
     install_requires=[

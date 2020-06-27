@@ -44,11 +44,13 @@ cdef inline dtype_t _logaddexp(dtype_t a, dtype_t b) nogil:
         return max(a, b) + log1pl(expl(-fabsl(a - b)))
 
 
-def _forward(int n_samples, int n_components,
+def old_forward(int n_samples, int n_components,
              dtype_t[:] log_startprob,
-             dtype_t[:, :] log_transmat,
+             dtype_t[:, :] transmat,
              dtype_t[:, :] framelogprob,
-             dtype_t[:, :] fwdlattice):
+             dtype_t[:, :] fwdlattice,
+             dtype_t[:, :] A1,
+             dtype_t[:] U):
 
     cdef int t, i, j
     cdef dtype_t[::view.contiguous] work_buffer = np.zeros(n_components)
@@ -60,16 +62,51 @@ def _forward(int n_samples, int n_components,
         for t in range(1, n_samples):
             for j in range(n_components):
                 for i in range(n_components):
-                    work_buffer[i] = fwdlattice[t - 1, i] + log_transmat[i, j]
+                    work_buffer[i] = fwdlattice[t - 1, i] + logl(transmat[i, j] + U[t] * A1[i,j])
 
                 fwdlattice[t, j] = _logsumexp(work_buffer) + framelogprob[t, j]
 
+def _forward(int n_samples, int n_components,
+             dtype_t[:] log_startprob,
+             dtype_t[:,:, :] log_transmat,
+             dtype_t[:, :] framelogprob,
+             dtype_t[:, :] fwdlattice,):
 
-def _backward(int n_samples, int n_components,
+    cdef int t, i, j
+    cdef dtype_t[::view.contiguous] work_buffer = np.zeros(n_components)
+
+    with nogil:
+        for i in range(n_components):
+            fwdlattice[0, i] = log_startprob[i] + framelogprob[0, i]
+
+        for t in range(1, n_samples):
+            for j in range(n_components):
+                for i in range(n_components):
+                    work_buffer[i] = fwdlattice[t - 1, i] + log_transmat[t,i,j]
+
+                fwdlattice[t, j] = _logsumexp(work_buffer) + framelogprob[t, j]
+
+def _transition_posterior(int n_samples, int n_components,
+             dtype_t[:,:, :] log_P_tij,
+             dtype_t[:, :] log_posteriors):
+
+    cdef int t, i, j
+
+    with nogil:
+
+        for t in range(1, n_samples):
+            for j in range(n_components):
+                for i in range(n_components):
+                  log_P_tij[t,i,j] = log_posteriors[t-1,i] + log_posteriors[t,j]
+
+
+def _old_backward(int n_samples, int n_components,
               dtype_t[:] log_startprob,
-              dtype_t[:, :] log_transmat,
+              dtype_t[:, :] transmat,
               dtype_t[:, :] framelogprob,
-              dtype_t[:, :] bwdlattice):
+              dtype_t[:, :] bwdlattice,
+              dtype_t[:, :] A1,
+              dtype_t[:] U):
 
     cdef int t, i, j
     cdef dtype_t[::view.contiguous] work_buffer = np.zeros(n_components)
@@ -81,11 +118,29 @@ def _backward(int n_samples, int n_components,
         for t in range(n_samples - 2, -1, -1):
             for i in range(n_components):
                 for j in range(n_components):
-                    work_buffer[j] = (log_transmat[i, j]
+                    work_buffer[j] = (logl(transmat[i, j] + U[t] * A1[i,j])
                                       + framelogprob[t + 1, j]
                                       + bwdlattice[t + 1, j])
                 bwdlattice[t, i] = _logsumexp(work_buffer)
 
+def _backward(int n_samples, int n_components,
+              dtype_t[:] log_startprob,
+              dtype_t[:, :, :] log_transmat,
+              dtype_t[:, :] framelogprob,
+              dtype_t[:, :] bwdlattice,):
+
+    cdef int t, i, j
+    cdef dtype_t[::view.contiguous] work_buffer = np.zeros(n_components)
+
+    with nogil:
+        for i in range(n_components):
+            bwdlattice[n_samples - 1, i] = 0.0
+
+        for t in range(n_samples - 2, -1, -1):
+            for i in range(n_components):
+                for j in range(n_components):
+                    work_buffer[j] = log_transmat[t, i, j] + framelogprob[t + 1, j] + bwdlattice[t + 1, j]
+                bwdlattice[t, i] = _logsumexp(work_buffer)
 
 def _compute_log_xi_sum(int n_samples, int n_components,
                         dtype_t[:, :] fwdlattice,
