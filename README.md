@@ -10,7 +10,7 @@ This could be viewed as the suppression of one or more latent states (eg. A1 red
 We assume that the system equilibriates back to A0 such that the transition matrix
 at any time point can be written as:
 
-<img src="https://render.githubusercontent.com/render/math?math= A(t)=A_0%2bU_tA_1">
+<img src="https://render.githubusercontent.com/render/math?math=A(t)=A_0%2bU_tA_1">
 
 The goal is to estimate U<sub>t</sub>. Currently we have implemented several c-level optimization
 scripts to optimize U as a sigmoid function.
@@ -18,7 +18,7 @@ scripts to optimize U as a sigmoid function.
 
 ## Demo
 As a brief demo, we use the hmmlearn package to generate synthetic data from an original transition matrix A<sub>0</sub>,
- and perturbed matrices (A<sub>0</sub>+A<sub>1</sub>)$, and $(A<sub>0</sub>+A<sub>1</sub>/2)$. By appending this data, we
+ and perturbed matrices (A<sub>0</sub>+A<sub>1</sub>), and (A<sub>0</sub>+A<sub>1</sub>/2). By appending this data, we
  create the equivalent of a 3 level step function for U. We then build an sb_hmm object
  and fit for U using the synthetic data. Results given below:
 
